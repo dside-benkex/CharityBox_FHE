@@ -5,38 +5,45 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
-interface DonationData {
+interface DonationProject {
   id: string;
   name: string;
   targetAmount: number;
   currentAmount: number;
   description: string;
-  timestamp: number;
   creator: string;
-  isVerified?: boolean;
-  decryptedValue?: number;
+  timestamp: number;
+  isVerified: boolean;
+  decryptedAmount?: number;
+  encryptedValueHandle?: string;
+}
+
+interface DonationStats {
+  totalProjects: number;
+  totalDonations: number;
+  verifiedProjects: number;
+  avgDonation: number;
 }
 
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [donations, setDonations] = useState<DonationData[]>([]);
+  const [projects, setProjects] = useState<DonationProject[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [creatingDonation, setCreatingDonation] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
     status: "pending", 
     message: "" 
   });
-  const [newDonationData, setNewDonationData] = useState({ name: "", targetAmount: "", description: "" });
-  const [selectedDonation, setSelectedDonation] = useState<DonationData | null>(null);
+  const [newProjectData, setNewProjectData] = useState({ name: "", targetAmount: "", description: "" });
+  const [selectedProject, setSelectedProject] = useState<DonationProject | null>(null);
+  const [userHistory, setUserHistory] = useState<DonationProject[]>([]);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 6;
 
   const { status, initialize, isInitialized } = useFhevm();
   const { encrypt, isEncrypting } = useEncrypt();
@@ -44,7 +51,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized) return;
+      if (fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -94,28 +103,32 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const donationsList: DonationData[] = [];
+      const projectsList: DonationProject[] = [];
       
       for (const businessId of businessIds) {
         try {
           const businessData = await contract.getBusinessData(businessId);
-          donationsList.push({
+          projectsList.push({
             id: businessId,
             name: businessData.name,
-            targetAmount: Number(businessData.publicValue1) || 0,
-            currentAmount: Number(businessData.publicValue2) || 0,
+            targetAmount: Number(businessData.publicValue1) || 1000,
+            currentAmount: 0,
             description: businessData.description,
-            timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
+            timestamp: Number(businessData.timestamp),
             isVerified: businessData.isVerified,
-            decryptedValue: Number(businessData.decryptedValue) || 0
+            decryptedAmount: Number(businessData.decryptedValue) || 0
           });
         } catch (e) {
-          console.error('Error loading business data:', e);
+          console.error('Error loading project data:', e);
         }
       }
       
-      setDonations(donationsList);
+      setProjects(projectsList);
+      if (address) {
+        const userProjects = projectsList.filter(p => p.creator.toLowerCase() === address.toLowerCase());
+        setUserHistory(userProjects);
+      }
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -124,58 +137,101 @@ const App: React.FC = () => {
     }
   };
 
-  const createDonation = async () => {
+  const createProject = async () => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setCreatingDonation(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating donation project with FHE..." });
+    setCreatingProject(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Creating project with FHE encryption..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const targetAmount = parseInt(newDonationData.targetAmount) || 0;
-      const businessId = `donation-${Date.now()}`;
+      const initialDonation = 100;
+      const businessId = `charity-${Date.now()}`;
       
-      const encryptedResult = await encrypt(contractAddress, address, targetAmount);
+      const encryptedResult = await encrypt(contractAddress, address, initialDonation);
       
       const tx = await contract.createBusinessData(
         businessId,
-        newDonationData.name,
+        newProjectData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
-        targetAmount,
+        parseInt(newProjectData.targetAmount) || 1000,
         0,
-        newDonationData.description
+        newProjectData.description
       );
       
       setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Donation project created successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Project created successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadData();
       setShowCreateModal(false);
-      setNewDonationData({ name: "", targetAmount: "", description: "" });
+      setNewProjectData({ name: "", targetAmount: "", description: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
-        : "Submission failed: " + (e.message || "Unknown error");
+        ? "Transaction rejected" 
+        : "Creation failed: " + (e.message || "Unknown error");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setCreatingDonation(false); 
+      setCreatingProject(false); 
     }
   };
 
-  const decryptData = async (businessId: string): Promise<number | null> => {
+  const donateToProject = async (projectId: string, amount: number) => {
+    if (!isConnected || !address) { 
+      setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+      return; 
+    }
+    
+    setTransactionStatus({ visible: true, status: "pending", message: "Processing encrypted donation..." });
+    
+    try {
+      const contract = await getContractWithSigner();
+      if (!contract) throw new Error("Failed to get contract with signer");
+      
+      const encryptedResult = await encrypt(contractAddress, address, amount);
+      const businessId = `donation-${projectId}-${Date.now()}`;
+      
+      const tx = await contract.createBusinessData(
+        businessId,
+        `Donation to ${projects.find(p => p.id === projectId)?.name}`,
+        encryptedResult.encryptedData,
+        encryptedResult.proof,
+        amount,
+        0,
+        `Encrypted donation of ${amount}`
+      );
+      
+      await tx.wait();
+      
+      setTransactionStatus({ visible: true, status: "success", message: "Donation completed with FHE protection!" });
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
+      
+      await loadData();
+    } catch (e: any) {
+      const errorMessage = e.message?.includes("user rejected transaction") 
+        ? "Transaction rejected" 
+        : "Donation failed";
+      setTransactionStatus({ visible: true, status: "error", message: errorMessage });
+      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
+    }
+  };
+
+  const decryptProjectAmount = async (projectId: string): Promise<number | null> => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -186,10 +242,10 @@ const App: React.FC = () => {
       const contractRead = await getContractReadOnly();
       if (!contractRead) return null;
       
-      const businessData = await contractRead.getBusinessData(businessId);
+      const businessData = await contractRead.getBusinessData(projectId);
       if (businessData.isVerified) {
         const storedValue = Number(businessData.decryptedValue) || 0;
-        setTransactionStatus({ visible: true, status: "success", message: "Data already verified on-chain" });
+        setTransactionStatus({ visible: true, status: "success", message: "Data already verified" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         return storedValue;
       }
@@ -197,118 +253,109 @@ const App: React.FC = () => {
       const contractWrite = await getContractWithSigner();
       if (!contractWrite) return null;
       
-      const encryptedValueHandle = await contractRead.getEncryptedValue(businessId);
+      const encryptedValueHandle = await contractRead.getEncryptedValue(projectId);
       
       const result = await verifyDecryption(
         [encryptedValueHandle],
         contractAddress,
         (abiEncodedClearValues: string, decryptionProof: string) => 
-          contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
+          contractWrite.verifyDecryption(projectId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption..." });
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Amount decrypted successfully!" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      
       return Number(clearValue);
       
     } catch (e: any) { 
       if (e.message?.includes("Data already verified")) {
-        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified on-chain" });
+        setTransactionStatus({ visible: true, status: "success", message: "Data is already verified" });
         setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
         await loadData();
         return null;
       }
       
-      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed: " + (e.message || "Unknown error") });
+      setTransactionStatus({ visible: true, status: "error", message: "Decryption failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return null; 
     }
   };
 
-  const checkAvailability = async () => {
+  const callIsAvailable = async () => {
     try {
       const contract = await getContractReadOnly();
-      if (!contract) return;
-      
-      const isAvailable = await contract.isAvailable();
-      setTransactionStatus({ visible: true, status: "success", message: "Contract is available and working!" });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      if (contract) {
+        const result = await contract.isAvailable();
+        setTransactionStatus({ visible: true, status: "success", message: "Contract is available!" });
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      }
     } catch (e) {
-      setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
+      setTransactionStatus({ visible: true, status: "error", message: "Contract call failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const filteredDonations = donations.filter(donation =>
-    donation.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    donation.description.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const getDonationStats = (): DonationStats => {
+    const totalProjects = projects.length;
+    const verifiedProjects = projects.filter(p => p.isVerified).length;
+    const totalDonations = projects.reduce((sum, p) => sum + (p.decryptedAmount || 0), 0);
+    const avgDonation = totalProjects > 0 ? totalDonations / totalProjects : 0;
+    
+    return { totalProjects, totalDonations, verifiedProjects, avgDonation };
+  };
 
-  const paginatedDonations = filteredDonations.slice(
-    (currentPage - 1) * itemsPerPage,
-    currentPage * itemsPerPage
-  );
-
-  const totalPages = Math.ceil(filteredDonations.length / itemsPerPage);
-
-  const renderProgressBar = (current: number, target: number) => {
-    const percentage = target > 0 ? Math.min(100, (current / target) * 100) : 0;
+  const renderStats = () => {
+    const stats = getDonationStats();
+    
     return (
-      <div className="progress-container">
-        <div className="progress-bar">
-          <div 
-            className="progress-fill" 
-            style={{ width: `${percentage}%` }}
-          ></div>
+      <div className="stats-grid">
+        <div className="stat-card metal-card">
+          <div className="stat-icon">📊</div>
+          <div className="stat-value">{stats.totalProjects}</div>
+          <div className="stat-label">Total Projects</div>
         </div>
-        <div className="progress-text">{percentage.toFixed(1)}%</div>
+        <div className="stat-card metal-card">
+          <div className="stat-icon">💰</div>
+          <div className="stat-value">{stats.totalDonations}</div>
+          <div className="stat-label">Total Donations</div>
+        </div>
+        <div className="stat-card metal-card">
+          <div className="stat-icon">✅</div>
+          <div className="stat-value">{stats.verifiedProjects}</div>
+          <div className="stat-label">Verified</div>
+        </div>
+        <div className="stat-card metal-card">
+          <div className="stat-icon">📈</div>
+          <div className="stat-value">{stats.avgDonation.toFixed(0)}</div>
+          <div className="stat-label">Avg Donation</div>
+        </div>
       </div>
     );
   };
 
-  const renderStatistics = () => {
-    const totalProjects = donations.length;
-    const totalRaised = donations.reduce((sum, d) => sum + d.currentAmount, 0);
-    const completedProjects = donations.filter(d => d.currentAmount >= d.targetAmount).length;
-    const avgProgress = donations.length > 0 
-      ? donations.reduce((sum, d) => sum + (d.currentAmount / d.targetAmount * 100), 0) / donations.length 
-      : 0;
-
+  const renderProgressChart = (project: DonationProject) => {
+    const progress = project.isVerified ? 
+      Math.min(100, ((project.decryptedAmount || 0) / project.targetAmount) * 100) : 50;
+    
     return (
-      <div className="statistics-grid">
-        <div className="stat-card">
-          <div className="stat-icon">📊</div>
-          <div className="stat-content">
-            <h3>Total Projects</h3>
-            <div className="stat-value">{totalProjects}</div>
-          </div>
+      <div className="progress-chart">
+        <div className="progress-header">
+          <span>Funding Progress</span>
+          <span>{progress.toFixed(1)}%</span>
         </div>
-        
-        <div className="stat-card">
-          <div className="stat-icon">💰</div>
-          <div className="stat-content">
-            <h3>Total Raised</h3>
-            <div className="stat-value">${totalRaised.toLocaleString()}</div>
-          </div>
+        <div className="progress-bar">
+          <div 
+            className="progress-fill" 
+            style={{ width: `${progress}%` }}
+          ></div>
         </div>
-        
-        <div className="stat-card">
-          <div className="stat-icon">✅</div>
-          <div className="stat-content">
-            <h3>Completed</h3>
-            <div className="stat-value">{completedProjects}</div>
-          </div>
-        </div>
-        
-        <div className="stat-card">
-          <div className="stat-icon">📈</div>
-          <div className="stat-content">
-            <h3>Avg Progress</h3>
-            <div className="stat-value">{avgProgress.toFixed(1)}%</div>
-          </div>
+        <div className="progress-labels">
+          <span>0</span>
+          <span>Target: {project.targetAmount}</span>
         </div>
       </div>
     );
@@ -319,8 +366,8 @@ const App: React.FC = () => {
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>🔒 Confidential Charity</h1>
-            <p>FHE Protected Donations</p>
+            <h1>CharityBox FHE 🔐</h1>
+            <p>Privacy-First Charity Donations</p>
           </div>
           <div className="header-actions">
             <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
@@ -329,23 +376,9 @@ const App: React.FC = () => {
         
         <div className="connection-prompt">
           <div className="connection-content">
-            <div className="connection-icon">🔐</div>
-            <h2>Connect Your Wallet to Continue</h2>
-            <p>Please connect your wallet to access encrypted charity donations and protect donor privacy.</p>
-            <div className="connection-steps">
-              <div className="step">
-                <span>1</span>
-                <p>Connect your wallet using the button above</p>
-              </div>
-              <div className="step">
-                <span>2</span>
-                <p>FHE system will automatically initialize</p>
-              </div>
-              <div className="step">
-                <span>3</span>
-                <p>Start creating and supporting encrypted charity projects</p>
-              </div>
-            </div>
+            <div className="connection-icon">🔒</div>
+            <h2>Connect Your Wallet to Start</h2>
+            <p>Experience fully encrypted charity donations with FHE technology</p>
           </div>
         </div>
       </div>
@@ -357,7 +390,6 @@ const App: React.FC = () => {
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
         <p>Initializing FHE Encryption System...</p>
-        <p className="loading-note">Securing your donations with fully homomorphic encryption</p>
       </div>
     );
   }
@@ -373,153 +405,127 @@ const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>🔒 Confidential Charity</h1>
-          <p>FHE Protected Donations</p>
+          <h1>CharityBox FHE 🔐</h1>
+          <p>Encrypted Donations • Transparent Impact</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={checkAvailability} className="check-btn">
-            Check Availability
-          </button>
-          <button onClick={() => setShowCreateModal(true)} className="create-btn">
-            + New Project
-          </button>
+          <button onClick={callIsAvailable} className="test-btn">Test Contract</button>
+          <button onClick={() => setShowCreateModal(true)} className="create-btn">+ New Project</button>
           <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
         </div>
       </header>
       
       <div className="main-content">
-        <div className="hero-section">
-          <h2>Transparent Charity, Private Donations</h2>
-          <p>FHE technology ensures your donations are counted while keeping your identity and amount private</p>
+        <div className="stats-section">
+          <h2>Charity Statistics</h2>
+          {renderStats()}
         </div>
-
-        {renderStatistics()}
-
-        <div className="search-section">
-          <div className="search-container">
-            <input
-              type="text"
-              placeholder="Search charity projects..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="search-input"
-            />
+        
+        <div className="projects-section">
+          <div className="section-header">
+            <h2>Active Charity Projects</h2>
             <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
-              {isRefreshing ? "🔄" : "Refresh"}
+              {isRefreshing ? "Refreshing..." : "Refresh"}
             </button>
           </div>
-        </div>
-
-        <div className="donations-grid">
-          {paginatedDonations.length === 0 ? (
-            <div className="no-projects">
-              <p>No charity projects found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Create First Project
-              </button>
-            </div>
-          ) : (
-            paginatedDonations.map((donation) => (
-              <div key={donation.id} className="donation-card">
+          
+          <div className="projects-grid">
+            {projects.length === 0 ? (
+              <div className="no-projects">
+                <p>No charity projects found</p>
+                <button onClick={() => setShowCreateModal(true)} className="create-btn">
+                  Create First Project
+                </button>
+              </div>
+            ) : projects.map((project) => (
+              <div className="project-card metal-card" key={project.id}>
                 <div className="card-header">
-                  <h3>{donation.name}</h3>
-                  {donation.isVerified && <span className="verified-badge">✅ Verified</span>}
+                  <h3>{project.name}</h3>
+                  <span className={`status-badge ${project.isVerified ? 'verified' : 'encrypted'}`}>
+                    {project.isVerified ? '✅ Verified' : '🔒 Encrypted'}
+                  </span>
                 </div>
                 
-                <p className="card-description">{donation.description}</p>
+                <p className="project-description">{project.description}</p>
                 
-                <div className="progress-section">
-                  <div className="progress-info">
-                    <span>Raised: ${donation.currentAmount.toLocaleString()}</span>
-                    <span>Target: ${donation.targetAmount.toLocaleString()}</span>
-                  </div>
-                  {renderProgressBar(donation.currentAmount, donation.targetAmount)}
-                </div>
-
-                <div className="card-meta">
-                  <span>Created: {new Date(donation.timestamp * 1000).toLocaleDateString()}</span>
-                  <span>By: {donation.creator.substring(0, 6)}...{donation.creator.substring(38)}</span>
-                </div>
-
+                {renderProgressChart(project)}
+                
                 <div className="card-actions">
                   <button 
-                    onClick={() => decryptData(donation.id)}
-                    className={`decrypt-btn ${donation.isVerified ? 'verified' : ''}`}
+                    onClick={() => donateToProject(project.id, 100)}
+                    className="donate-btn"
                   >
-                    {donation.isVerified ? '✅ Verified' : '🔓 Verify FHE'}
+                    Donate 100
                   </button>
                   <button 
-                    onClick={() => setSelectedDonation(donation)}
-                    className="details-btn"
+                    onClick={() => decryptProjectAmount(project.id)}
+                    className="decrypt-btn"
                   >
-                    View Details
+                    {project.isVerified ? 'View Amount' : 'Decrypt'}
                   </button>
                 </div>
+                
+                <div className="card-footer">
+                  <span>By: {project.creator.substring(0, 6)}...{project.creator.substring(38)}</span>
+                </div>
               </div>
-            ))
-          )}
-        </div>
-
-        {totalPages > 1 && (
-          <div className="pagination">
-            <button 
-              onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-              disabled={currentPage === 1}
-            >
-              Previous
-            </button>
-            <span>Page {currentPage} of {totalPages}</span>
-            <button 
-              onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-              disabled={currentPage === totalPages}
-            >
-              Next
-            </button>
+            ))}
           </div>
-        )}
+        </div>
+        
+        <div className="history-section">
+          <h2>Your Donation History</h2>
+          <div className="history-list">
+            {userHistory.map((project, index) => (
+              <div className="history-item metal-card" key={index}>
+                <div className="history-info">
+                  <strong>{project.name}</strong>
+                  <span>{new Date(project.timestamp * 1000).toLocaleDateString()}</span>
+                </div>
+                <div className="history-amount">
+                  {project.isVerified ? `Amount: ${project.decryptedAmount}` : 'Amount: 🔒 Encrypted'}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
-
+      
       {showCreateModal && (
         <div className="modal-overlay">
-          <div className="create-modal">
+          <div className="create-modal metal-card">
             <div className="modal-header">
               <h2>Create New Charity Project</h2>
-              <button onClick={() => setShowCreateModal(false)} className="close-modal">×</button>
+              <button onClick={() => setShowCreateModal(false)} className="close-btn">×</button>
             </div>
             
             <div className="modal-body">
-              <div className="fhe-notice">
-                <strong>FHE 🔐 Protection</strong>
-                <p>Target amount will be encrypted using Zama FHE technology</p>
-              </div>
-              
               <div className="form-group">
-                <label>Project Name *</label>
+                <label>Project Name</label>
                 <input 
-                  type="text"
-                  value={newDonationData.name}
-                  onChange={(e) => setNewDonationData({...newDonationData, name: e.target.value})}
+                  type="text" 
+                  value={newProjectData.name}
+                  onChange={(e) => setNewProjectData({...newProjectData, name: e.target.value})}
                   placeholder="Enter project name..."
                 />
               </div>
               
               <div className="form-group">
-                <label>Target Amount (FHE Encrypted) *</label>
+                <label>Target Amount</label>
                 <input 
-                  type="number"
-                  value={newDonationData.targetAmount}
-                  onChange={(e) => setNewDonationData({...newDonationData, targetAmount: e.target.value})}
+                  type="number" 
+                  value={newProjectData.targetAmount}
+                  onChange={(e) => setNewProjectData({...newProjectData, targetAmount: e.target.value})}
                   placeholder="Enter target amount..."
-                  min="1"
                 />
               </div>
               
               <div className="form-group">
-                <label>Description *</label>
+                <label>Description</label>
                 <textarea 
-                  value={newDonationData.description}
-                  onChange={(e) => setNewDonationData({...newDonationData, description: e.target.value})}
+                  value={newProjectData.description}
+                  onChange={(e) => setNewProjectData({...newProjectData, description: e.target.value})}
                   placeholder="Describe your charity project..."
                   rows={3}
                 />
@@ -529,99 +535,29 @@ const App: React.FC = () => {
             <div className="modal-footer">
               <button onClick={() => setShowCreateModal(false)} className="cancel-btn">Cancel</button>
               <button 
-                onClick={createDonation}
-                disabled={creatingDonation || isEncrypting || !newDonationData.name || !newDonationData.targetAmount || !newDonationData.description}
+                onClick={createProject} 
+                disabled={creatingProject || isEncrypting}
                 className="submit-btn"
               >
-                {creatingDonation || isEncrypting ? "Encrypting..." : "Create Project"}
+                {creatingProject || isEncrypting ? "Creating..." : "Create Project"}
               </button>
             </div>
           </div>
         </div>
       )}
-
-      {selectedDonation && (
-        <div className="modal-overlay">
-          <div className="detail-modal">
-            <div className="modal-header">
-              <h2>{selectedDonation.name}</h2>
-              <button onClick={() => setSelectedDonation(null)} className="close-modal">×</button>
-            </div>
-            
-            <div className="modal-body">
-              <div className="project-info">
-                <p>{selectedDonation.description}</p>
-                
-                <div className="info-grid">
-                  <div className="info-item">
-                    <span>Target Amount:</span>
-                    <strong>${selectedDonation.targetAmount.toLocaleString()}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Current Raised:</span>
-                    <strong>${selectedDonation.currentAmount.toLocaleString()}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Created:</span>
-                    <strong>{new Date(selectedDonation.timestamp * 1000).toLocaleDateString()}</strong>
-                  </div>
-                  <div className="info-item">
-                    <span>Creator:</span>
-                    <strong>{selectedDonation.creator}</strong>
-                  </div>
-                </div>
-
-                <div className="progress-section">
-                  <h4>Funding Progress</h4>
-                  {renderProgressBar(selectedDonation.currentAmount, selectedDonation.targetAmount)}
-                </div>
-
-                <div className="fhe-status">
-                  <h4>FHE Encryption Status</h4>
-                  <div className={`status-badge ${selectedDonation.isVerified ? 'verified' : 'encrypted'}`}>
-                    {selectedDonation.isVerified ? '✅ On-chain Verified' : '🔒 FHE Encrypted'}
-                  </div>
-                  {selectedDonation.isVerified && selectedDonation.decryptedValue && (
-                    <p>Decrypted target amount: ${selectedDonation.decryptedValue.toLocaleString()}</p>
-                  )}
-                </div>
-              </div>
-            </div>
-            
-            <div className="modal-footer">
-              <button onClick={() => setSelectedDonation(null)} className="close-btn">Close</button>
-              <button 
-                onClick={() => decryptData(selectedDonation.id)}
-                className="verify-btn"
-              >
-                {selectedDonation.isVerified ? 'Re-verify' : 'Verify FHE Data'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
+      
       {transactionStatus.visible && (
-        <div className="transaction-modal">
-          <div className="transaction-content">
-            <div className={`transaction-icon ${transactionStatus.status}`}>
+        <div className="transaction-toast">
+          <div className={`toast-content ${transactionStatus.status}`}>
+            <div className="toast-icon">
               {transactionStatus.status === "pending" && <div className="spinner"></div>}
               {transactionStatus.status === "success" && "✓"}
               {transactionStatus.status === "error" && "✗"}
             </div>
-            <div className="transaction-message">{transactionStatus.message}</div>
+            <span>{transactionStatus.message}</span>
           </div>
         </div>
       )}
-
-      <footer className="app-footer">
-        <div className="footer-content">
-          <p>🔒 Confidential Charity - Protecting donor privacy with FHE technology</p>
-          <div className="footer-links">
-            <span>Transparent · Private · Secure</span>
-          </div>
-        </div>
-      </footer>
     </div>
   );
 };
